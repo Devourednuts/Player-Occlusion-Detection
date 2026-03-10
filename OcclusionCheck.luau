@@ -195,8 +195,6 @@ local function SubmitCharacterData(player, character, record, generation)
 	local torso = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChild("Humanoid")
 	if not primaryPart or not head or not torso or not humanoid then return false end
-	local primaryPartClassName = primaryPart.ClassName
-	if primaryPartClassName ~= "Part" and primaryPartClassName ~= "MeshPart" and primaryPartClassName ~= "UnionOperation" then return false end
 	local leftLeg = character:FindFirstChild("LeftLeg") or character:FindFirstChild("LeftLowerLeg") or primaryPart
 	local rightLeg = character:FindFirstChild("RightLeg") or character:FindFirstChild("RightLowerLeg") or primaryPart
 	local leftArm = character:FindFirstChild("LeftArm") or character:FindFirstChild("LeftLowerArm") or primaryPart
@@ -359,8 +357,6 @@ RunService.Render:Connect(function()
 		end
 		local primaryPart = character.PrimaryPart
 		if not primaryPart then continue end
-		local primaryPartClassName = primaryPart.ClassName
-		if primaryPartClassName ~= "Part" and primaryPartClassName ~= "MeshPart" and primaryPartClassName ~= "UnionOperation" then continue end
 		local primaryPartPosition = primaryPart.Position
 		whitelistUpdateBuffer.Whitelisted = IsPositionOccluded(cameraPositionX, cameraPositionY, cameraPositionZ, primaryPartPosition.X, primaryPartPosition.Y, primaryPartPosition.Z)
 		edit_model_data(whitelistUpdateBuffer, record.Name)
