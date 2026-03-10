@@ -15,20 +15,21 @@ local mathInfinity = math.huge
 local LocalPlayer = Players.LocalPlayer
 local CachedWorldParts = {}
 local CachedWorldPartCount = 0
-local RegisteredPlayerNames = {}
-local ActivePlayers = {}
-local ActivePlayerCount = 0
+local CharacterRoots = {}
+local CharacterRootCount = 0
+local PlayerRecords = {}
+local PlayerRecordCount = 0
+local PlayerRecordIndex = {}
+local CurrentPlayerSet = {}
 local WhitelistUpdateBuffer = { Whitelisted = false }
 
-local function BuildIgnoredCharacterTable()
-	local ignoredInstances = {}
-	for _, player in Players:GetChildren() do
-		local character = player.Character
-		if character then
-			ignoredInstances[character] = true
+local function IsCharacterDescendant(instance)
+	for i = 1, CharacterRootCount do
+		if instance:IsDescendantOf(CharacterRoots[i]) then
+			return true
 		end
 	end
-	return ignoredInstances
+	return false
 end
 
 local function CacheNearbyWorldParts()
@@ -38,58 +39,71 @@ local function CacheNearbyWorldParts()
 	local cameraX = cameraPosition.X
 	local cameraY = cameraPosition.Y
 	local cameraZ = cameraPosition.Z
-	local ignoredInstances = BuildIgnoredCharacterTable()
-	local nearbyParts = {}
+
+	local cachedParts = CachedWorldParts
 	local partCount = 0
 	local iterationCount = 0
-	local traversalStack = { workspace }
-	local traversalStackSize = 1
-	while traversalStackSize > 0 do
-		local instance = traversalStack[traversalStackSize]
-		traversalStack[traversalStackSize] = nil
-		traversalStackSize = traversalStackSize - 1
-		if instance and instance.Parent and not ignoredInstances[instance] then
-			local className = instance.ClassName
-			if className == "Part" or className == "MeshPart" or className == "UnionOperation" then
-				local partPosition = instance.Position
-				if partPosition then
-					local deltaX = partPosition.X - cameraX
-					local deltaY = partPosition.Y - cameraY
-					local deltaZ = partPosition.Z - cameraZ
-					if deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <= RENDER_DISTANCE_SQUARED then
-						local partCFrame = instance.CFrame
-						local partSize = instance.Size
-						if partCFrame and partSize then
-							local rightVector = partCFrame.RightVector
-							local upVector = partCFrame.UpVector
-							local lookVector = partCFrame.LookVector
-							local halfSizeX = partSize.X * 0.5
-							local halfSizeY = partSize.Y * 0.5
-							local halfSizeZ = partSize.Z * 0.5
-							partCount = partCount + 1
-							nearbyParts[partCount] = {
-								PositionX = partPosition.X, PositionY = partPosition.Y, PositionZ = partPosition.Z,
-								RightAxisX = rightVector.X,   RightAxisY = rightVector.Y,   RightAxisZ = rightVector.Z,   HalfSizeX = halfSizeX,
-								UpAxisX = upVector.X,         UpAxisY = upVector.Y,         UpAxisZ = upVector.Z,         HalfSizeY = halfSizeY,
-								ForwardAxisX = -lookVector.X, ForwardAxisY = -lookVector.Y, ForwardAxisZ = -lookVector.Z, HalfSizeZ = halfSizeZ,
-								BoundingSphereRadiusSquared = halfSizeX * halfSizeX + halfSizeY * halfSizeY + halfSizeZ * halfSizeZ,
-							}
-						end
-					end
+	local descendants = workspace:GetDescendants()
+
+	for i = 1, #descendants do
+		local instance = descendants[i]
+		local className = instance.ClassName
+		if (className == "Part" or className == "MeshPart" or className == "UnionOperation")
+			and instance.Parent and not IsCharacterDescendant(instance) then
+			local position = instance.Position
+			local deltaX = position.X - cameraX
+			local deltaY = position.Y - cameraY
+			local deltaZ = position.Z - cameraZ
+			if deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <= RENDER_DISTANCE_SQUARED then
+				local cframe = instance.CFrame
+				local size = instance.Size
+				local halfSizeX = size.X * 0.5
+				local halfSizeY = size.Y * 0.5
+				local halfSizeZ = size.Z * 0.5
+				local rightVector = cframe.RightVector
+				local upVector = cframe.UpVector
+				local lookVector = cframe.LookVector
+				local boundingRadiusSquared = halfSizeX * halfSizeX + halfSizeY * halfSizeY + halfSizeZ * halfSizeZ
+				partCount += 1
+				local entry = cachedParts[partCount]
+				if entry then
+					entry.PositionX = position.X
+					entry.PositionY = position.Y
+					entry.PositionZ = position.Z
+					entry.RightAxisX = rightVector.X
+					entry.RightAxisY = rightVector.Y
+					entry.RightAxisZ = rightVector.Z
+					entry.HalfSizeX = halfSizeX
+					entry.UpAxisX = upVector.X
+					entry.UpAxisY = upVector.Y
+					entry.UpAxisZ = upVector.Z
+					entry.HalfSizeY = halfSizeY
+					entry.ForwardAxisX = -lookVector.X
+					entry.ForwardAxisY = -lookVector.Y
+					entry.ForwardAxisZ = -lookVector.Z
+					entry.HalfSizeZ = halfSizeZ
+					entry.BoundingSphereRadiusSquared = boundingRadiusSquared
+				else
+					cachedParts[partCount] = {
+						PositionX = position.X,       PositionY = position.Y,       PositionZ = position.Z,
+						RightAxisX = rightVector.X,   RightAxisY = rightVector.Y,   RightAxisZ = rightVector.Z,   HalfSizeX = halfSizeX,
+						UpAxisX = upVector.X,         UpAxisY = upVector.Y,         UpAxisZ = upVector.Z,         HalfSizeY = halfSizeY,
+						ForwardAxisX = -lookVector.X, ForwardAxisY = -lookVector.Y, ForwardAxisZ = -lookVector.Z, HalfSizeZ = halfSizeZ,
+						BoundingSphereRadiusSquared = boundingRadiusSquared,
+					}
 				end
 			end
-			local children = instance:GetChildren()
-			for childIndex = 1, #children do
-				traversalStackSize = traversalStackSize + 1
-				traversalStack[traversalStackSize] = children[childIndex]
-			end
-			iterationCount = iterationCount + 1
-			if iterationCount % ITERATION_YIELD_INTERVAL == 0 then
-				task.wait()
-			end
+		end
+		iterationCount += 1
+		if iterationCount % ITERATION_YIELD_INTERVAL == 0 then
+			task.wait()
 		end
 	end
-	CachedWorldParts = nearbyParts
+
+	for i = partCount + 1, #cachedParts do
+		cachedParts[i] = nil
+	end
+
 	CachedWorldPartCount = partCount
 end
 
@@ -158,7 +172,8 @@ local function IsPositionOccluded(cameraX, cameraY, cameraZ, targetX, targetY, t
 	local rayDirectionZ = deltaZ * inverseMagnitude
 	local rayLength = 1 / inverseMagnitude
 	local localCachedParts = CachedWorldParts
-	for partIndex = 1, CachedWorldPartCount do
+	local localPartCount = CachedWorldPartCount
+	for partIndex = 1, localPartCount do
 		local orientedBox = localCachedParts[partIndex]
 		local boxOffsetX = orientedBox.PositionX - cameraX
 		local boxOffsetY = orientedBox.PositionY - cameraY
@@ -173,15 +188,13 @@ local function IsPositionOccluded(cameraX, cameraY, cameraZ, targetX, targetY, t
 	return false
 end
 
-local function RegisterPlayerCharacter(player)
-	if player == LocalPlayer then return end
-	local character = player.Character
-	if not character then return end
+local function SubmitCharacterData(player, character, record, generation)
+	if record.SubmitGeneration ~= generation then return true end
 	local primaryPart = character.PrimaryPart
 	local head = character:FindFirstChild("Head")
 	local torso = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChild("Humanoid")
-	if not primaryPart or not head or not torso or not humanoid then return end
+	if not primaryPart or not head or not torso or not humanoid then return false end
 	local leftLeg = character:FindFirstChild("LeftLeg") or character:FindFirstChild("LeftLowerLeg") or primaryPart
 	local rightLeg = character:FindFirstChild("RightLeg") or character:FindFirstChild("RightLowerLeg") or primaryPart
 	local leftArm = character:FindFirstChild("LeftArm") or character:FindFirstChild("LeftLowerArm") or primaryPart
@@ -189,8 +202,10 @@ local function RegisterPlayerCharacter(player)
 	local rigType = character:FindFirstChild("LowerTorso") and 1 or 0
 	local bodyHeightScaleObject = character:FindFirstChild("BodyHeightScale")
 	local bodyHeightScale = bodyHeightScaleObject and bodyHeightScaleObject.Value or 1
+	if record.SubmitGeneration ~= generation then return true end
+	remove_model_data(record.Name)
 	add_model_data({
-		Username = player.Name,
+		Username = record.Name,
 		Displayname = player.DisplayName,
 		Userid = player.UserId,
 		Character = character,
@@ -215,22 +230,90 @@ local function RegisterPlayerCharacter(player)
 		Triggerbot_Part = head,
 		body_parts_data = {},
 		full_body_data = {},
-	}, player.Name)
-	RegisteredPlayerNames[player.Name] = true
-	ActivePlayerCount = ActivePlayerCount + 1
-	ActivePlayers[ActivePlayerCount] = player
+	}, record.Name)
+	record.CachedHumanoid = humanoid
+	return true
 end
 
-for _, player in Players:GetChildren() do
-	RegisterPlayerCharacter(player)
+local function WaitAndSubmitCharacter(player, character, record)
+	local generation = record.SubmitGeneration
+	task.spawn(function()
+		while character.Parent do
+			if SubmitCharacterData(player, character, record, generation) then break end
+			task.wait()
+		end
+	end)
 end
 
-task.spawn(CacheNearbyWorldParts)
+local function AddPlayer(player)
+	if player == LocalPlayer then return end
+	if PlayerRecordIndex[player] then return end
+	local record = {
+		Player = player,
+		Name = player.Name,
+		CachedCharacter = nil,
+		CachedHumanoid = nil,
+		SubmitGeneration = 0,
+	}
+	PlayerRecordCount += 1
+	PlayerRecords[PlayerRecordCount] = record
+	PlayerRecordIndex[player] = PlayerRecordCount
+	local character = player.Character
+	if character then
+		record.CachedCharacter = character
+		WaitAndSubmitCharacter(player, character, record)
+	end
+end
+
+local function RemovePlayer(player)
+	local index = PlayerRecordIndex[player]
+	if not index then return end
+	local record = PlayerRecords[index]
+	record.SubmitGeneration += 1
+	remove_model_data(record.Name)
+	if index ~= PlayerRecordCount then
+		local lastRecord = PlayerRecords[PlayerRecordCount]
+		PlayerRecords[index] = lastRecord
+		PlayerRecordIndex[lastRecord.Player] = index
+	end
+	PlayerRecords[PlayerRecordCount] = nil
+	PlayerRecordIndex[player] = nil
+	PlayerRecordCount -= 1
+end
+
+local function SyncState()
+	local previousRootCount = CharacterRootCount
+	CharacterRootCount = 0
+	table.clear(CurrentPlayerSet)
+
+	for _, player in Players:GetChildren() do
+		CurrentPlayerSet[player] = true
+		AddPlayer(player)
+		local character = player.Character
+		if character then
+			CharacterRootCount += 1
+			CharacterRoots[CharacterRootCount] = character
+		end
+	end
+
+	for i = CharacterRootCount + 1, previousRootCount do
+		CharacterRoots[i] = nil
+	end
+
+	for i = PlayerRecordCount, 1, -1 do
+		if not CurrentPlayerSet[PlayerRecords[i].Player] then
+			RemovePlayer(PlayerRecords[i].Player)
+		end
+	end
+end
+
+SyncState()
 
 task.spawn(function()
 	while true do
+		SyncState()
+		CacheNearbyWorldParts()
 		task.wait(CACHE_REFRESH_INTERVAL)
-		task.spawn(CacheNearbyWorldParts)
 	end
 end)
 
@@ -241,17 +324,35 @@ RunService.Render:Connect(function()
 	local cameraPositionX = cameraPosition.X
 	local cameraPositionY = cameraPosition.Y
 	local cameraPositionZ = cameraPosition.Z
-	local localActivePlayers = ActivePlayers
+	local localPlayerRecords = PlayerRecords
 	local whitelistUpdateBuffer = WhitelistUpdateBuffer
-	for playerIndex = 1, ActivePlayerCount do
-		local player = localActivePlayers[playerIndex]
-		if not RegisteredPlayerNames[player.Name] then continue end
+	local localPlayerTeam = LocalPlayer.Team
+	for i = 1, PlayerRecordCount do
+		local record = localPlayerRecords[i]
+		local player = record.Player
+		if localPlayerTeam ~= nil and player.Team == localPlayerTeam then continue end
 		local character = player.Character
-		if not character then continue end
+		if not character or character.ClassName ~= "Model" then continue end
+		if record.CachedCharacter ~= character then
+			record.CachedCharacter = character
+			record.CachedHumanoid = nil
+			record.SubmitGeneration += 1
+			WaitAndSubmitCharacter(player, character, record)
+			continue
+		end
+		local humanoid = record.CachedHumanoid
+		if not humanoid then continue end
+		if humanoid.Health <= 0 then
+			whitelistUpdateBuffer.Whitelisted = true
+			edit_model_data(whitelistUpdateBuffer, record.Name)
+			continue
+		end
 		local primaryPart = character.PrimaryPart
 		if not primaryPart then continue end
 		local primaryPartPosition = primaryPart.Position
 		whitelistUpdateBuffer.Whitelisted = IsPositionOccluded(cameraPositionX, cameraPositionY, cameraPositionZ, primaryPartPosition.X, primaryPartPosition.Y, primaryPartPosition.Z)
-		edit_model_data(whitelistUpdateBuffer, player.Name)
+		edit_model_data(whitelistUpdateBuffer, record.Name)
 	end
 end)
+
+print("Player Occlusion Detection Initilised")
