@@ -203,7 +203,10 @@ local function SubmitCharacterData(player, character, record, generation)
 	local bodyHeightScaleObject = character:FindFirstChild("BodyHeightScale")
 	local bodyHeightScale = bodyHeightScaleObject and bodyHeightScaleObject.Value or 1
 	if record.SubmitGeneration ~= generation then return true end
-	remove_model_data(record.Name)
+	if record.Submitted then
+		remove_model_data(record.Name)
+		record.Submitted = false
+	end
 	add_model_data({
 		Username = record.Name,
 		Displayname = player.DisplayName,
@@ -231,6 +234,7 @@ local function SubmitCharacterData(player, character, record, generation)
 		body_parts_data = {},
 		full_body_data = {},
 	}, record.Name)
+	record.Submitted = true
 	record.CachedHumanoid = humanoid
 	return true
 end
@@ -254,6 +258,7 @@ local function AddPlayer(player)
 		CachedCharacter = nil,
 		CachedHumanoid = nil,
 		SubmitGeneration = 0,
+		Submitted = false,
 	}
 	PlayerRecordCount += 1
 	PlayerRecords[PlayerRecordCount] = record
@@ -270,7 +275,10 @@ local function RemovePlayer(player)
 	if not index then return end
 	local record = PlayerRecords[index]
 	record.SubmitGeneration += 1
-	remove_model_data(record.Name)
+	if record.Submitted then
+		remove_model_data(record.Name)
+		record.Submitted = false
+	end
 	if index ~= PlayerRecordCount then
 		local lastRecord = PlayerRecords[PlayerRecordCount]
 		PlayerRecords[index] = lastRecord
