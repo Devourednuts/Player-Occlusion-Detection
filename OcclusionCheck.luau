@@ -1,314 +1,364 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
-local RENDER_DISTANCE_SQUARED = 500 * 500
-local CACHE_REFRESH_INTERVAL = 1
-local ITERATION_YIELD_INTERVAL = 50
-local RAY_PARALLEL_EPSILON = 1e-5
-local DISTANCE_MINIMUM_EPSILON = 1e-10
+local RENDER_DISTANCE_SQUARED: number = 500 * 500
+local CACHE_REFRESH_INTERVAL: number = 1
+local ITERATION_YIELD_INTERVAL: number = 50
+local RAY_PARALLEL_EPSILON: number = 1e-5
+local DISTANCE_MINIMUM_EPSILON: number = 1e-10
 
-local mathSquareRoot = math.sqrt
-local mathAbsolute = math.abs
-local mathMaximum = math.max
-local mathInfinity = math.huge
+local mathSqrt: (number) -> number = math.sqrt
+local mathAbs: (number) -> number = math.abs
+local mathMax: (number, number) -> number = math.max
+local mathHuge: number = math.huge
 
-local LocalPlayer = Players.LocalPlayer
-local CachedWorldParts = {}
-local CachedWorldPartCount = 0
-local CharacterRoots = {}
-local CharacterRootCount = 0
-local PlayerRecords = {}
-local PlayerRecordCount = 0
-local PlayerRecordIndex = {}
-local CurrentPlayerSet = {}
-local WhitelistUpdateBuffer = { Whitelisted = false }
+local fnAddModelData: (data: { [string]: any }, key: string) -> boolean = add_model_data
+local fnEditModelData: (data: { [string]: any }, key: string) -> boolean = edit_model_data
+local fnRemoveModelData: (key: string) -> boolean = remove_model_data
 
-local function IsCharacterDescendant(instance)
-	for i = 1, CharacterRootCount do
-		if instance:IsDescendantOf(CharacterRoots[i]) then
+type OBBEntry = {
+	PositionX: number, PositionY: number, PositionZ: number,
+	RightAxisX: number, RightAxisY: number, RightAxisZ: number, HalfSizeX: number,
+	UpAxisX: number,    UpAxisY: number,    UpAxisZ: number,    HalfSizeY: number,
+	ForwardAxisX: number, ForwardAxisY: number, ForwardAxisZ: number, HalfSizeZ: number,
+	BoundingSphereRadiusSquared: number,
+}
+
+type PlayerRecord = {
+	Player: Player,
+	Name: string,
+	CachedCharacter: Model?,
+	CachedHumanoid: Humanoid?,
+	SubmitGeneration: number,
+	HasModelData: boolean,
+}
+
+local LocalPlayer: Player = Players.LocalPlayer :: Player
+
+local CachedWorldParts: { OBBEntry } = {}
+local CachedWorldPartCount: number = 0
+local CharacterRootSet: { [Instance]: boolean } = {}
+local PlayerRecords: { PlayerRecord } = {}
+local PlayerRecordCount: number = 0
+local PlayerRecordIndex: { [Player]: number } = {}
+local CurrentPlayerSet: { [Player]: boolean } = {}
+local WhitelistBuffer: { Whitelisted: boolean } = { Whitelisted = false }
+
+local CACHEABLE_CLASSES: { [string]: boolean } = {
+	Part = true,
+	MeshPart = true,
+	UnionOperation = true,
+}
+
+local function IsCharacterDescendant(instance: Instance): boolean
+	local current: Instance? = instance.Parent
+	while current ~= nil and current ~= (workspace :: Instance) do
+		if CharacterRootSet[current :: Instance] then
 			return true
 		end
+		current = (current :: Instance).Parent
 	end
 	return false
 end
 
-local function CacheNearbyWorldParts()
-	local camera = workspace.CurrentCamera
-	if not camera then return end
-	local cameraPosition = camera.Position
-	local cameraX = cameraPosition.X
-	local cameraY = cameraPosition.Y
-	local cameraZ = cameraPosition.Z
+local function CacheNearbyWorldParts(): ()
+	local camera: Camera? = workspace.CurrentCamera
+	if camera == nil then
+		return
+	end
+	local camPos: Vector3 = (camera :: Camera).Position
+	local camX: number = camPos.X
+	local camY: number = camPos.Y
+	local camZ: number = camPos.Z
 
-	local cachedParts = CachedWorldParts
-	local partCount = 0
-	local iterationCount = 0
-	local descendants = workspace:GetDescendants()
+	local parts: { OBBEntry } = CachedWorldParts
+	local partCount: number = 0
+	local yieldCounter: number = ITERATION_YIELD_INTERVAL
+	local descendants: { Instance } = workspace:GetDescendants()
 
-	for i = 1, #descendants do
-		local instance = descendants[i]
-		local className = instance.ClassName
-		if (className == "Part" or className == "MeshPart" or className == "UnionOperation")
-			and instance.Parent and not IsCharacterDescendant(instance) then
-			local position = instance.Position
-			local deltaX = position.X - cameraX
-			local deltaY = position.Y - cameraY
-			local deltaZ = position.Z - cameraZ
-			if deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <= RENDER_DISTANCE_SQUARED then
-				local cframe = instance.CFrame
-				local size = instance.Size
-				local halfSizeX = size.X * 0.5
-				local halfSizeY = size.Y * 0.5
-				local halfSizeZ = size.Z * 0.5
-				local rightVector = cframe.RightVector
-				local upVector = cframe.UpVector
-				local lookVector = cframe.LookVector
-				local boundingRadiusSquared = halfSizeX * halfSizeX + halfSizeY * halfSizeY + halfSizeZ * halfSizeZ
+	for i: number = 1, #descendants do
+		local inst: Instance = descendants[i]
+		if CACHEABLE_CLASSES[inst.ClassName] and inst.Parent ~= nil and not IsCharacterDescendant(inst) then
+			local bp: BasePart = inst :: BasePart
+			local pos: Vector3 = bp.Position
+			local dx: number = pos.X - camX
+			local dy: number = pos.Y - camY
+			local dz: number = pos.Z - camZ
+			if dx * dx + dy * dy + dz * dz <= RENDER_DISTANCE_SQUARED then
+				local sz: Vector3 = bp.Size
+				local hx: number = sz.X * 0.5
+				local hy: number = sz.Y * 0.5
+				local hz: number = sz.Z * 0.5
+				local rv: Vector3 = bp.RightVector
+				local uv: Vector3 = bp.UpVector
+				local lv: Vector3 = bp.LookVector
+				local bsr: number = hx * hx + hy * hy + hz * hz
 				partCount += 1
-				local entry = cachedParts[partCount]
-				if entry then
-					entry.PositionX = position.X
-					entry.PositionY = position.Y
-					entry.PositionZ = position.Z
-					entry.RightAxisX = rightVector.X
-					entry.RightAxisY = rightVector.Y
-					entry.RightAxisZ = rightVector.Z
-					entry.HalfSizeX = halfSizeX
-					entry.UpAxisX = upVector.X
-					entry.UpAxisY = upVector.Y
-					entry.UpAxisZ = upVector.Z
-					entry.HalfSizeY = halfSizeY
-					entry.ForwardAxisX = -lookVector.X
-					entry.ForwardAxisY = -lookVector.Y
-					entry.ForwardAxisZ = -lookVector.Z
-					entry.HalfSizeZ = halfSizeZ
-					entry.BoundingSphereRadiusSquared = boundingRadiusSquared
+				local entry: OBBEntry? = parts[partCount]
+				if entry ~= nil then
+					local e: OBBEntry = entry :: OBBEntry
+					e.PositionX    = pos.X
+					e.PositionY    = pos.Y
+					e.PositionZ    = pos.Z
+					e.RightAxisX   = rv.X
+					e.RightAxisY   = rv.Y
+					e.RightAxisZ   = rv.Z
+					e.HalfSizeX    = hx
+					e.UpAxisX      = uv.X
+					e.UpAxisY      = uv.Y
+					e.UpAxisZ      = uv.Z
+					e.HalfSizeY    = hy
+					e.ForwardAxisX = -lv.X
+					e.ForwardAxisY = -lv.Y
+					e.ForwardAxisZ = -lv.Z
+					e.HalfSizeZ    = hz
+					e.BoundingSphereRadiusSquared = bsr
 				else
-					cachedParts[partCount] = {
-						PositionX = position.X,       PositionY = position.Y,       PositionZ = position.Z,
-						RightAxisX = rightVector.X,   RightAxisY = rightVector.Y,   RightAxisZ = rightVector.Z,   HalfSizeX = halfSizeX,
-						UpAxisX = upVector.X,         UpAxisY = upVector.Y,         UpAxisZ = upVector.Z,         HalfSizeY = halfSizeY,
-						ForwardAxisX = -lookVector.X, ForwardAxisY = -lookVector.Y, ForwardAxisZ = -lookVector.Z, HalfSizeZ = halfSizeZ,
-						BoundingSphereRadiusSquared = boundingRadiusSquared,
+					parts[partCount] = {
+						PositionX    = pos.X,   PositionY    = pos.Y,   PositionZ    = pos.Z,
+						RightAxisX   = rv.X,    RightAxisY   = rv.Y,    RightAxisZ   = rv.Z,   HalfSizeX = hx,
+						UpAxisX      = uv.X,    UpAxisY      = uv.Y,    UpAxisZ      = uv.Z,   HalfSizeY = hy,
+						ForwardAxisX = -lv.X,   ForwardAxisY = -lv.Y,   ForwardAxisZ = -lv.Z,  HalfSizeZ = hz,
+						BoundingSphereRadiusSquared = bsr,
 					}
 				end
 			end
 		end
-		iterationCount += 1
-		if iterationCount % ITERATION_YIELD_INTERVAL == 0 then
+		yieldCounter -= 1
+		if yieldCounter == 0 then
+			yieldCounter = ITERATION_YIELD_INTERVAL
 			task.wait()
 		end
 	end
 
-	for i = partCount + 1, #cachedParts do
-		cachedParts[i] = nil
+	for i: number = partCount + 1, #parts do
+		parts[i] = nil :: any
 	end
 
 	CachedWorldPartCount = partCount
 end
 
-local function RayOrientedBoundingBoxIntersect(rayOriginX, rayOriginY, rayOriginZ, rayDirectionX, rayDirectionY, rayDirectionZ, orientedBox)
-	local offsetX = orientedBox.PositionX - rayOriginX
-	local offsetY = orientedBox.PositionY - rayOriginY
-	local offsetZ = orientedBox.PositionZ - rayOriginZ
-	local intersectionMinimum = -mathInfinity
-	local intersectionMaximum = mathInfinity
-	local axisProjection, slabDot, slabNear, slabFar, halfSize
+local function RayOBBIntersect(
+	rox: number, roy: number, roz: number,
+	rdx: number, rdy: number, rdz: number,
+	box: OBBEntry
+): number?
+	local ox: number = box.PositionX - rox
+	local oy: number = box.PositionY - roy
+	local oz: number = box.PositionZ - roz
+	local tMin: number = -mathHuge
+	local tMax: number = mathHuge
+	local proj: number
+	local dot: number
+	local near: number
+	local far: number
+	local half: number
 
-	axisProjection = orientedBox.RightAxisX * offsetX + orientedBox.RightAxisY * offsetY + orientedBox.RightAxisZ * offsetZ
-	slabDot = orientedBox.RightAxisX * rayDirectionX + orientedBox.RightAxisY * rayDirectionY + orientedBox.RightAxisZ * rayDirectionZ
-	halfSize = orientedBox.HalfSizeX
-	if mathAbsolute(slabDot) > RAY_PARALLEL_EPSILON then
-		slabNear = (axisProjection + halfSize) / slabDot
-		slabFar = (axisProjection - halfSize) / slabDot
-		if slabNear > slabFar then slabNear, slabFar = slabFar, slabNear end
-		if slabNear > intersectionMinimum then intersectionMinimum = slabNear end
-		if slabFar < intersectionMaximum then intersectionMaximum = slabFar end
-		if intersectionMinimum > intersectionMaximum or intersectionMaximum < RAY_PARALLEL_EPSILON then return nil end
-	elseif (-axisProjection - halfSize > 0) or (-axisProjection + halfSize < 0) then
+	proj = box.RightAxisX * ox + box.RightAxisY * oy + box.RightAxisZ * oz
+	dot  = box.RightAxisX * rdx + box.RightAxisY * rdy + box.RightAxisZ * rdz
+	half = box.HalfSizeX
+	if mathAbs(dot) > RAY_PARALLEL_EPSILON then
+		near = (proj + half) / dot
+		far  = (proj - half) / dot
+		if near > far then near, far = far, near end
+		if near > tMin then tMin = near end
+		if far  < tMax then tMax = far  end
+		if tMin > tMax or tMax < RAY_PARALLEL_EPSILON then return nil end
+	elseif -proj - half > 0 or -proj + half < 0 then
 		return nil
 	end
 
-	axisProjection = orientedBox.UpAxisX * offsetX + orientedBox.UpAxisY * offsetY + orientedBox.UpAxisZ * offsetZ
-	slabDot = orientedBox.UpAxisX * rayDirectionX + orientedBox.UpAxisY * rayDirectionY + orientedBox.UpAxisZ * rayDirectionZ
-	halfSize = orientedBox.HalfSizeY
-	if mathAbsolute(slabDot) > RAY_PARALLEL_EPSILON then
-		slabNear = (axisProjection + halfSize) / slabDot
-		slabFar = (axisProjection - halfSize) / slabDot
-		if slabNear > slabFar then slabNear, slabFar = slabFar, slabNear end
-		if slabNear > intersectionMinimum then intersectionMinimum = slabNear end
-		if slabFar < intersectionMaximum then intersectionMaximum = slabFar end
-		if intersectionMinimum > intersectionMaximum or intersectionMaximum < RAY_PARALLEL_EPSILON then return nil end
-	elseif (-axisProjection - halfSize > 0) or (-axisProjection + halfSize < 0) then
+	proj = box.UpAxisX * ox + box.UpAxisY * oy + box.UpAxisZ * oz
+	dot  = box.UpAxisX * rdx + box.UpAxisY * rdy + box.UpAxisZ * rdz
+	half = box.HalfSizeY
+	if mathAbs(dot) > RAY_PARALLEL_EPSILON then
+		near = (proj + half) / dot
+		far  = (proj - half) / dot
+		if near > far then near, far = far, near end
+		if near > tMin then tMin = near end
+		if far  < tMax then tMax = far  end
+		if tMin > tMax or tMax < RAY_PARALLEL_EPSILON then return nil end
+	elseif -proj - half > 0 or -proj + half < 0 then
 		return nil
 	end
 
-	axisProjection = orientedBox.ForwardAxisX * offsetX + orientedBox.ForwardAxisY * offsetY + orientedBox.ForwardAxisZ * offsetZ
-	slabDot = orientedBox.ForwardAxisX * rayDirectionX + orientedBox.ForwardAxisY * rayDirectionY + orientedBox.ForwardAxisZ * rayDirectionZ
-	halfSize = orientedBox.HalfSizeZ
-	if mathAbsolute(slabDot) > RAY_PARALLEL_EPSILON then
-		slabNear = (axisProjection + halfSize) / slabDot
-		slabFar = (axisProjection - halfSize) / slabDot
-		if slabNear > slabFar then slabNear, slabFar = slabFar, slabNear end
-		if slabNear > intersectionMinimum then intersectionMinimum = slabNear end
-		if slabFar < intersectionMaximum then intersectionMaximum = slabFar end
-		if intersectionMinimum > intersectionMaximum or intersectionMaximum < RAY_PARALLEL_EPSILON then return nil end
-	elseif (-axisProjection - halfSize > 0) or (-axisProjection + halfSize < 0) then
+	proj = box.ForwardAxisX * ox + box.ForwardAxisY * oy + box.ForwardAxisZ * oz
+	dot  = box.ForwardAxisX * rdx + box.ForwardAxisY * rdy + box.ForwardAxisZ * rdz
+	half = box.HalfSizeZ
+	if mathAbs(dot) > RAY_PARALLEL_EPSILON then
+		near = (proj + half) / dot
+		far  = (proj - half) / dot
+		if near > far then near, far = far, near end
+		if near > tMin then tMin = near end
+		if far  < tMax then tMax = far  end
+		if tMin > tMax or tMax < RAY_PARALLEL_EPSILON then return nil end
+	elseif -proj - half > 0 or -proj + half < 0 then
 		return nil
 	end
 
-	return mathMaximum(0, intersectionMinimum)
+	return mathMax(0, tMin)
 end
 
-local function IsPositionOccluded(cameraX, cameraY, cameraZ, targetX, targetY, targetZ)
-	local deltaX = targetX - cameraX
-	local deltaY = targetY - cameraY
-	local deltaZ = targetZ - cameraZ
-	local distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
-	if distanceSquared < DISTANCE_MINIMUM_EPSILON then return false end
-	local inverseMagnitude = 1 / mathSquareRoot(distanceSquared)
-	local rayDirectionX = deltaX * inverseMagnitude
-	local rayDirectionY = deltaY * inverseMagnitude
-	local rayDirectionZ = deltaZ * inverseMagnitude
-	local rayLength = 1 / inverseMagnitude
-	local localCachedParts = CachedWorldParts
-	local localPartCount = CachedWorldPartCount
-	for partIndex = 1, localPartCount do
-		local orientedBox = localCachedParts[partIndex]
-		local boxOffsetX = orientedBox.PositionX - cameraX
-		local boxOffsetY = orientedBox.PositionY - cameraY
-		local boxOffsetZ = orientedBox.PositionZ - cameraZ
-		local closestApproach = boxOffsetX * rayDirectionX + boxOffsetY * rayDirectionY + boxOffsetZ * rayDirectionZ
-		local perpendicularDistanceSquared = boxOffsetX * boxOffsetX + boxOffsetY * boxOffsetY + boxOffsetZ * boxOffsetZ - closestApproach * closestApproach
-		if perpendicularDistanceSquared <= orientedBox.BoundingSphereRadiusSquared then
-			local intersectionDistance = RayOrientedBoundingBoxIntersect(cameraX, cameraY, cameraZ, rayDirectionX, rayDirectionY, rayDirectionZ, orientedBox)
-			if intersectionDistance ~= nil and intersectionDistance < rayLength then return true end
+local function IsPositionOccluded(
+	cx: number, cy: number, cz: number,
+	tx: number, ty: number, tz: number
+): boolean
+	local dx: number = tx - cx
+	local dy: number = ty - cy
+	local dz: number = tz - cz
+	local distSq: number = dx * dx + dy * dy + dz * dz
+	if distSq < DISTANCE_MINIMUM_EPSILON then
+		return false
+	end
+	local invMag: number = 1 / mathSqrt(distSq)
+	local rdx: number = dx * invMag
+	local rdy: number = dy * invMag
+	local rdz: number = dz * invMag
+	local rayLen: number = 1 / invMag
+	local parts: { OBBEntry } = CachedWorldParts
+	local count: number = CachedWorldPartCount
+	for i: number = 1, count do
+		local box: OBBEntry = parts[i]
+		local bx: number = box.PositionX - cx
+		local by: number = box.PositionY - cy
+		local bz: number = box.PositionZ - cz
+		local ca: number = bx * rdx + by * rdy + bz * rdz
+		local perpSq: number = bx * bx + by * by + bz * bz - ca * ca
+		if perpSq <= box.BoundingSphereRadiusSquared then
+			local t: number? = RayOBBIntersect(cx, cy, cz, rdx, rdy, rdz, box)
+			if t ~= nil and t < rayLen then
+				return true
+			end
 		end
 	end
 	return false
 end
 
-local function SubmitCharacterData(player, character, record, generation)
-	if record.SubmitGeneration ~= generation then return true end
-	local primaryPart = character.PrimaryPart
-	local head = character:FindFirstChild("Head")
-	local torso = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChild("Humanoid")
-	if not primaryPart or not head or not torso or not humanoid then return false end
-	local leftLeg = character:FindFirstChild("LeftLeg") or character:FindFirstChild("LeftLowerLeg") or primaryPart
-	local rightLeg = character:FindFirstChild("RightLeg") or character:FindFirstChild("RightLowerLeg") or primaryPart
-	local leftArm = character:FindFirstChild("LeftArm") or character:FindFirstChild("LeftLowerArm") or primaryPart
-	local rightArm = character:FindFirstChild("RightArm") or character:FindFirstChild("RightLowerArm") or primaryPart
-	local rigType = character:FindFirstChild("LowerTorso") and 1 or 0
-	local bodyHeightScaleObject = character:FindFirstChild("BodyHeightScale")
-	local bodyHeightScale = bodyHeightScaleObject and bodyHeightScaleObject.Value or 1
-	if record.SubmitGeneration ~= generation then return true end
-	if record.Submitted then
-		remove_model_data(record.Name)
-		record.Submitted = false
+local function SubmitCharacterData(player: Player, character: Model, record: PlayerRecord, generation: number): boolean
+	if record.SubmitGeneration ~= generation then
+		return true
 	end
-	add_model_data({
-		Username = record.Name,
-		Displayname = player.DisplayName,
-		Userid = player.UserId,
-		Character = character,
-		PrimaryPart = primaryPart,
-		Head = head,
-		Torso = torso,
-		LeftLeg = leftLeg,
-		RightLeg = rightLeg,
-		LeftArm = leftArm,
-		RightArm = rightArm,
-		Humanoid = humanoid,
-		Health = humanoid.Health,
-		MaxHealth = humanoid.MaxHealth,
-		Toolname = "",
-		Teamname = "",
+	local primaryPart: BasePart? = character.PrimaryPart
+	local head: Instance? = character:FindFirstChild("Head")
+	local torso: Instance? = character:FindFirstChild("HumanoidRootPart")
+	local humanoid: Instance? = character:FindFirstChildOfClass("Humanoid")
+	if primaryPart == nil or head == nil or torso == nil or humanoid == nil then
+		return false
+	end
+	local leftLeg: Instance = character:FindFirstChild("LeftLeg") or character:FindFirstChild("LeftLowerLeg") or (primaryPart :: Instance)
+	local rightLeg: Instance = character:FindFirstChild("RightLeg") or character:FindFirstChild("RightLowerLeg") or (primaryPart :: Instance)
+	local leftArm: Instance = character:FindFirstChild("LeftArm") or character:FindFirstChild("LeftLowerArm") or (primaryPart :: Instance)
+	local rightArm: Instance = character:FindFirstChild("RightArm") or character:FindFirstChild("RightLowerArm") or (primaryPart :: Instance)
+	local rigType: number = if character:FindFirstChild("LowerTorso") ~= nil then 1 else 0
+	local bhsObject: Instance? = character:FindFirstChild("BodyHeightScale")
+	local bodyHeightScale: number = if bhsObject ~= nil then (bhsObject :: NumberValue).Value else 1
+	if record.SubmitGeneration ~= generation then
+		return true
+	end
+	if record.HasModelData then
+		fnRemoveModelData(record.Name)
+	end
+	local hum: Humanoid = humanoid :: Humanoid
+	fnAddModelData({
+		Username        = record.Name,
+		Displayname     = player.DisplayName,
+		Userid          = player.UserId,
+		Character       = character,
+		PrimaryPart     = primaryPart,
+		Head            = head,
+		Torso           = torso,
+		LeftLeg         = leftLeg,
+		RightLeg        = rightLeg,
+		LeftArm         = leftArm,
+		RightArm        = rightArm,
+		Humanoid        = hum,
+		Health          = hum.Health,
+		MaxHealth       = hum.MaxHealth,
+		Toolname        = "",
+		Teamname        = "",
 		BodyHeightScale = bodyHeightScale,
-		RigType = rigType,
-		Whitelisted = false,
-		Archenemies = false,
-		Aimbot_Part = head,
-		Aimbot_TP_Part = torso,
+		RigType         = rigType,
+		Whitelisted     = false,
+		Archenemies     = false,
+		Aimbot_Part     = head,
+		Aimbot_TP_Part  = torso,
 		Triggerbot_Part = head,
 		body_parts_data = {},
-		full_body_data = {},
+		full_body_data  = {},
 	}, record.Name)
-	record.Submitted = true
-	record.CachedHumanoid = humanoid
+	record.HasModelData = true
+	record.CachedHumanoid = hum
 	return true
 end
 
-local function WaitAndSubmitCharacter(player, character, record)
-	local generation = record.SubmitGeneration
+local function WaitAndSubmitCharacter(player: Player, character: Model, record: PlayerRecord): ()
+	local generation: number = record.SubmitGeneration
 	task.spawn(function()
-		while character.Parent do
-			if SubmitCharacterData(player, character, record, generation) then break end
+		while character.Parent ~= nil do
+			if SubmitCharacterData(player, character, record, generation) then
+				break
+			end
 			task.wait()
 		end
 	end)
 end
 
-local function AddPlayer(player)
-	if player == LocalPlayer then return end
-	if PlayerRecordIndex[player] then return end
-	local record = {
-		Player = player,
-		Name = player.Name,
-		CachedCharacter = nil,
-		CachedHumanoid = nil,
+local function AddPlayer(player: Player): ()
+	if player == LocalPlayer or PlayerRecordIndex[player] ~= nil then
+		return
+	end
+	local record: PlayerRecord = {
+		Player           = player,
+		Name             = player.Name,
+		CachedCharacter  = nil,
+		CachedHumanoid   = nil,
 		SubmitGeneration = 0,
-		Submitted = false,
+		HasModelData     = false,
 	}
 	PlayerRecordCount += 1
 	PlayerRecords[PlayerRecordCount] = record
 	PlayerRecordIndex[player] = PlayerRecordCount
-	local character = player.Character
-	if character then
+	local character: Model? = player.Character
+	if character ~= nil then
 		record.CachedCharacter = character
-		WaitAndSubmitCharacter(player, character, record)
+		WaitAndSubmitCharacter(player, character :: Model, record)
 	end
 end
 
-local function RemovePlayer(player)
-	local index = PlayerRecordIndex[player]
-	if not index then return end
-	local record = PlayerRecords[index]
+local function RemovePlayer(player: Player): ()
+	local index: number? = PlayerRecordIndex[player]
+	if index == nil then
+		return
+	end
+	local i: number = index :: number
+	local record: PlayerRecord = PlayerRecords[i]
 	record.SubmitGeneration += 1
-	if record.Submitted then
-		remove_model_data(record.Name)
-		record.Submitted = false
+	if record.HasModelData then
+		fnRemoveModelData(record.Name)
+		record.HasModelData = false
 	end
-	if index ~= PlayerRecordCount then
-		local lastRecord = PlayerRecords[PlayerRecordCount]
-		PlayerRecords[index] = lastRecord
-		PlayerRecordIndex[lastRecord.Player] = index
+	if i ~= PlayerRecordCount then
+		local lastRecord: PlayerRecord = PlayerRecords[PlayerRecordCount]
+		PlayerRecords[i] = lastRecord
+		PlayerRecordIndex[lastRecord.Player] = i
 	end
-	PlayerRecords[PlayerRecordCount] = nil
-	PlayerRecordIndex[player] = nil
+	PlayerRecords[PlayerRecordCount] = nil :: any
+	PlayerRecordIndex[player] = nil :: any
 	PlayerRecordCount -= 1
 end
 
-local function SyncState()
-	local previousRootCount = CharacterRootCount
-	CharacterRootCount = 0
+local function SyncState(): ()
 	table.clear(CurrentPlayerSet)
-
-	for _, player in Players:GetChildren() do
+	table.clear(CharacterRootSet)
+	for _, player: Player in Players:GetChildren() do
 		CurrentPlayerSet[player] = true
 		AddPlayer(player)
-		local character = player.Character
-		if character then
-			CharacterRootCount += 1
-			CharacterRoots[CharacterRootCount] = character
+		local character: Model? = player.Character
+		if character ~= nil then
+			CharacterRootSet[character :: Instance] = true
 		end
 	end
-
-	for i = CharacterRootCount + 1, previousRootCount do
-		CharacterRoots[i] = nil
-	end
-
-	for i = PlayerRecordCount, 1, -1 do
+	for i: number = PlayerRecordCount, 1, -1 do
 		if not CurrentPlayerSet[PlayerRecords[i].Player] then
 			RemovePlayer(PlayerRecords[i].Player)
 		end
@@ -326,40 +376,50 @@ task.spawn(function()
 end)
 
 RunService.Render:Connect(function()
-	local camera = workspace.CurrentCamera
-	if not camera then return end
-	local cameraPosition = camera.Position
-	local cameraPositionX = cameraPosition.X
-	local cameraPositionY = cameraPosition.Y
-	local cameraPositionZ = cameraPosition.Z
-	local localPlayerRecords = PlayerRecords
-	local whitelistUpdateBuffer = WhitelistUpdateBuffer
-	local localPlayerTeam = LocalPlayer.Team
-	for i = 1, PlayerRecordCount do
-		local record = localPlayerRecords[i]
-		local player = record.Player
-		if localPlayerTeam ~= nil and player.Team == localPlayerTeam then continue end
-		local character = player.Character
-		if not character or character.ClassName ~= "Model" then continue end
+	local camera: Camera? = workspace.CurrentCamera
+	if camera == nil then
+		return
+	end
+	local camPos: Vector3 = (camera :: Camera).Position
+	local cx: number = camPos.X
+	local cy: number = camPos.Y
+	local cz: number = camPos.Z
+	local records: { PlayerRecord } = PlayerRecords
+	local wbuf: { Whitelisted: boolean } = WhitelistBuffer
+	local localTeam: Team? = LocalPlayer.Team
+	for i: number = 1, PlayerRecordCount do
+		local record: PlayerRecord = records[i]
+		local player: Player = record.Player
+		if localTeam ~= nil and player.Team == localTeam then
+			continue
+		end
+		local character: Model? = player.Character
+		if character == nil then
+			continue
+		end
 		if record.CachedCharacter ~= character then
 			record.CachedCharacter = character
 			record.CachedHumanoid = nil
 			record.SubmitGeneration += 1
-			WaitAndSubmitCharacter(player, character, record)
+			WaitAndSubmitCharacter(player, character :: Model, record)
 			continue
 		end
-		local humanoid = record.CachedHumanoid
-		if not humanoid then continue end
-		if humanoid.Health <= 0 then
-			whitelistUpdateBuffer.Whitelisted = true
-			edit_model_data(whitelistUpdateBuffer, record.Name)
+		local humanoid: Humanoid? = record.CachedHumanoid
+		if humanoid == nil then
 			continue
 		end
-		local primaryPart = character.PrimaryPart
-		if not primaryPart then continue end
-		local primaryPartPosition = primaryPart.Position
-		whitelistUpdateBuffer.Whitelisted = IsPositionOccluded(cameraPositionX, cameraPositionY, cameraPositionZ, primaryPartPosition.X, primaryPartPosition.Y, primaryPartPosition.Z)
-		edit_model_data(whitelistUpdateBuffer, record.Name)
+		if (humanoid :: Humanoid).Health <= 0 then
+			wbuf.Whitelisted = true
+			fnEditModelData(wbuf, record.Name)
+			continue
+		end
+		local primaryPart: BasePart? = (character :: Model).PrimaryPart
+		if primaryPart == nil then
+			continue
+		end
+		local pos: Vector3 = (primaryPart :: BasePart).Position
+		wbuf.Whitelisted = IsPositionOccluded(cx, cy, cz, pos.X, pos.Y, pos.Z)
+		fnEditModelData(wbuf, record.Name)
 	end
 end)
 
