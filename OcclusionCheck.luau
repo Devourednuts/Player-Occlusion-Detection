@@ -1,5 +1,6 @@
 --!strict
 --!optimize 2
+--!native
 
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,12 +11,12 @@ local RAY_PARALLEL_EPSILON:     number = 1e-5
 local DISTANCE_MINIMUM_EPSILON: number = 1e-10
 local CHARACTER_ANCESTOR_LIMIT: number = 4
 
-local mathSqrt   = math.sqrt
-local mathAbs    = math.abs
-local mathMax    = math.max
-local mathHuge   = math.huge
-local osClock    = os.clock
-local tableClear = table.clear
+local mathSqrt       = math.sqrt
+local mathHuge       = math.huge
+local osClock        = os.clock
+local tableClear     = table.clear
+local IsRobloxActive = isrbxactive
+local Workspace      = workspace
 
 local AddModelData:    (data: {[string]: any}, key: string) -> boolean = add_model_data
 local EditModelData:   (data: {[string]: any}, key: string) -> boolean = edit_model_data
@@ -47,17 +48,19 @@ type PendingSubmit = {
 
 local LocalPlayer: Player = Players.LocalPlayer :: Player
 
-local CachedWorldParts:     { OrientedBoundingBoxEntry } = {}
-local CachedWorldPartCount: number                        = 0
-local CharacterRootSet:     { [Instance]: boolean }       = {}
-local PlayerRecords:        { PlayerRecord }              = {}
-local PlayerRecordCount:    number                        = 0
-local PlayerRecordIndex:    { [Player]: number }          = {}
-local CurrentPlayerSet:     { [Player]: boolean }         = {}
-local WhitelistBuffer:      { Whitelisted: boolean }      = { Whitelisted = false }
-local PendingSubmits:       { PendingSubmit }             = {}
-local PendingSubmitCount:   number                        = 0
-local LastSyncTime:         number                        = 0
+local CachedWorldParts:      { OrientedBoundingBoxEntry } = {}
+local CachedWorldPartCount:  number                        = 0
+local CharacterRootSet:      { [Instance]: boolean }       = {}
+local PlayerRecords:         { PlayerRecord }              = {}
+local PlayerRecordCount:     number                        = 0
+local PlayerRecordIndex:     { [Player]: number }          = {}
+local CurrentPlayerSet:      { [Player]: boolean }         = {}
+local WhitelistBuffer:       { Whitelisted: boolean }      = { Whitelisted = false }
+local PendingSubmits:        { PendingSubmit }             = {}
+local PendingSubmitCount:    number                        = 0
+local PendingSubmitPool:     { PendingSubmit }             = {}
+local PendingSubmitPoolCount: number                       = 0
+local LastSyncTime:          number                        = 0
 
 local CACHEABLE_CLASSES: { [string]: boolean } = {
     Part           = true,
@@ -78,7 +81,7 @@ local BASEPART_CLASSES: { [string]: boolean } = {
 local function IsCharacterDescendant(instance: Instance): boolean
     local current: Instance? = instance.Parent
     for _ = 1, CHARACTER_ANCESTOR_LIMIT do
-        if current == nil or current == (workspace :: Instance) then return false end
+        if current == nil or current == (Workspace :: Instance) then return false end
         if CharacterRootSet[current :: Instance] then return true end
         current = (current :: Instance).Parent
     end
@@ -86,15 +89,15 @@ local function IsCharacterDescendant(instance: Instance): boolean
 end
 
 local function CacheNearbyWorldParts()
-    local camera = workspace.CurrentCamera
+    local camera = Workspace.CurrentCamera
     if camera == nil then return end
-    local cameraPosition = camera.CFrame.Position
+    local cameraPosition = camera.Position
     local cameraX        = cameraPosition.X
     local cameraY        = cameraPosition.Y
     local cameraZ        = cameraPosition.Z
     local parts          = CachedWorldParts
     local count          = 0
-    for _, instance in workspace:GetDescendants() do
+    for _, instance in Workspace:GetDescendants() do
         if not CACHEABLE_CLASSES[instance.ClassName] or instance.Parent == nil or IsCharacterDescendant(instance) then
             continue
         end
@@ -146,16 +149,16 @@ local function RayIntersectsOrientedBoundingBox(
     local offsetZ = boundingBox.PositionZ - rayOriginZ
     local minimumIntersection = -mathHuge
     local maximumIntersection =  mathHuge
-    local projection:    number
-    local dotProduct:    number
-    local nearDistance:  number
-    local farDistance:   number
-    local halfExtent:    number
+    local projection:   number
+    local dotProduct:   number
+    local nearDistance: number
+    local farDistance:  number
+    local halfExtent:   number
 
     projection = boundingBox.RightAxisX*offsetX + boundingBox.RightAxisY*offsetY + boundingBox.RightAxisZ*offsetZ
     dotProduct = boundingBox.RightAxisX*rayDirectionX + boundingBox.RightAxisY*rayDirectionY + boundingBox.RightAxisZ*rayDirectionZ
     halfExtent = boundingBox.HalfSizeX
-    if mathAbs(dotProduct) > RAY_PARALLEL_EPSILON then
+    if dotProduct > RAY_PARALLEL_EPSILON or dotProduct < -RAY_PARALLEL_EPSILON then
         nearDistance = (projection + halfExtent) / dotProduct
         farDistance  = (projection - halfExtent) / dotProduct
         if nearDistance > farDistance then nearDistance, farDistance = farDistance, nearDistance end
@@ -167,7 +170,7 @@ local function RayIntersectsOrientedBoundingBox(
     projection = boundingBox.UpAxisX*offsetX + boundingBox.UpAxisY*offsetY + boundingBox.UpAxisZ*offsetZ
     dotProduct = boundingBox.UpAxisX*rayDirectionX + boundingBox.UpAxisY*rayDirectionY + boundingBox.UpAxisZ*rayDirectionZ
     halfExtent = boundingBox.HalfSizeY
-    if mathAbs(dotProduct) > RAY_PARALLEL_EPSILON then
+    if dotProduct > RAY_PARALLEL_EPSILON or dotProduct < -RAY_PARALLEL_EPSILON then
         nearDistance = (projection + halfExtent) / dotProduct
         farDistance  = (projection - halfExtent) / dotProduct
         if nearDistance > farDistance then nearDistance, farDistance = farDistance, nearDistance end
@@ -179,7 +182,7 @@ local function RayIntersectsOrientedBoundingBox(
     projection = boundingBox.ForwardAxisX*offsetX + boundingBox.ForwardAxisY*offsetY + boundingBox.ForwardAxisZ*offsetZ
     dotProduct = boundingBox.ForwardAxisX*rayDirectionX + boundingBox.ForwardAxisY*rayDirectionY + boundingBox.ForwardAxisZ*rayDirectionZ
     halfExtent = boundingBox.HalfSizeZ
-    if mathAbs(dotProduct) > RAY_PARALLEL_EPSILON then
+    if dotProduct > RAY_PARALLEL_EPSILON or dotProduct < -RAY_PARALLEL_EPSILON then
         nearDistance = (projection + halfExtent) / dotProduct
         farDistance  = (projection - halfExtent) / dotProduct
         if nearDistance > farDistance then nearDistance, farDistance = farDistance, nearDistance end
@@ -188,7 +191,7 @@ local function RayIntersectsOrientedBoundingBox(
         if minimumIntersection > maximumIntersection or maximumIntersection < RAY_PARALLEL_EPSILON then return nil end
     elseif -projection - halfExtent > 0 or -projection + halfExtent < 0 then return nil end
 
-    return mathMax(0, minimumIntersection)
+    return if minimumIntersection >= 0 then minimumIntersection else 0
 end
 
 local function IsPositionOccluded(
@@ -200,11 +203,12 @@ local function IsPositionOccluded(
     local directionZ      = targetZ - cameraZ
     local distanceSquared = directionX*directionX + directionY*directionY + directionZ*directionZ
     if distanceSquared < DISTANCE_MINIMUM_EPSILON then return false end
-    local inverseMagnitude = 1 / mathSqrt(distanceSquared)
+    local magnitude        = mathSqrt(distanceSquared)
+    local inverseMagnitude = 1 / magnitude
     local rayDirectionX    = directionX * inverseMagnitude
     local rayDirectionY    = directionY * inverseMagnitude
     local rayDirectionZ    = directionZ * inverseMagnitude
-    local rayLength        = 1 / inverseMagnitude
+    local rayLength        = magnitude
     local parts = CachedWorldParts
     local count = CachedWorldPartCount
     for i = 1, count do
@@ -227,10 +231,10 @@ local function TrySubmit(pendingSubmit: PendingSubmit): boolean
     if record.SubmitGeneration ~= pendingSubmit.Generation then return true end
     if character.Parent == nil then return true end
     if character.ClassName ~= "Model" then return true end
-    local primaryPart        = character.PrimaryPart
-    local head               = character:FindFirstChild("Head")
-    local torso              = character:FindFirstChild("HumanoidRootPart")
-    local humanoidObject     = character:FindFirstChildOfClass("Humanoid")
+    local primaryPart    = character.PrimaryPart
+    local head           = character:FindFirstChild("Head")
+    local torso          = character:FindFirstChild("HumanoidRootPart")
+    local humanoidObject = character:FindFirstChildOfClass("Humanoid")
     if primaryPart == nil or head == nil or torso == nil or humanoidObject == nil then return false end
     local leftLeg  = character:FindFirstChild("LeftLeg")  or character:FindFirstChild("LeftLowerLeg")  or (primaryPart :: Instance)
     local rightLeg = character:FindFirstChild("RightLeg") or character:FindFirstChild("RightLowerLeg") or (primaryPart :: Instance)
@@ -263,17 +267,32 @@ local function TrySubmit(pendingSubmit: PendingSubmit): boolean
 end
 
 local function EnqueueSubmit(player: Player, character: Model, record: PlayerRecord)
+    local submit: PendingSubmit
+    if PendingSubmitPoolCount > 0 then
+        submit = PendingSubmitPool[PendingSubmitPoolCount]
+        PendingSubmitPool[PendingSubmitPoolCount] = nil :: any
+        PendingSubmitPoolCount -= 1
+        submit.Player     = player
+        submit.Character  = character
+        submit.Record     = record
+        submit.Generation = record.SubmitGeneration
+    else
+        submit = { Player = player, Character = character, Record = record, Generation = record.SubmitGeneration }
+    end
     PendingSubmitCount += 1
-    PendingSubmits[PendingSubmitCount] = { Player = player, Character = character, Record = record, Generation = record.SubmitGeneration }
+    PendingSubmits[PendingSubmitCount] = submit
 end
 
 local function FlushPendingSubmits()
     local index = 1
     while index <= PendingSubmitCount do
-        if TrySubmit(PendingSubmits[index]) then
+        local submit = PendingSubmits[index]
+        if TrySubmit(submit) then
             PendingSubmits[index] = PendingSubmits[PendingSubmitCount]
             PendingSubmits[PendingSubmitCount] = nil :: any
             PendingSubmitCount -= 1
+            PendingSubmitPoolCount += 1
+            PendingSubmitPool[PendingSubmitPoolCount] = submit
         else
             index += 1
         end
@@ -331,7 +350,7 @@ end
 SyncState()
 
 RunService.PostModel:Connect(function()
-    if not isrbxactive() then return end
+    if not IsRobloxActive() then return end
     local now = osClock()
     if now - LastSyncTime >= CACHE_REFRESH_INTERVAL then
         LastSyncTime = now
@@ -342,10 +361,10 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostLocal:Connect(function()
-    if not isrbxactive() then return end
-    local camera = workspace.CurrentCamera
+    if not IsRobloxActive() then return end
+    local camera = Workspace.CurrentCamera
     if camera == nil then return end
-    local cameraPosition  = camera.CFrame.Position
+    local cameraPosition  = camera.Position
     local cameraX         = cameraPosition.X
     local cameraY         = cameraPosition.Y
     local cameraZ         = cameraPosition.Z
