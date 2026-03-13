@@ -48,19 +48,19 @@ type PendingSubmit = {
 
 local LocalPlayer: Player = Players.LocalPlayer :: Player
 
-local CachedWorldParts:      { OrientedBoundingBoxEntry } = {}
-local CachedWorldPartCount:  number                        = 0
-local CharacterRootSet:      { [Instance]: boolean }       = {}
-local PlayerRecords:         { PlayerRecord }              = {}
-local PlayerRecordCount:     number                        = 0
-local PlayerRecordIndex:     { [Player]: number }          = {}
-local CurrentPlayerSet:      { [Player]: boolean }         = {}
-local WhitelistBuffer:       { Whitelisted: boolean }      = { Whitelisted = false }
-local PendingSubmits:        { PendingSubmit }             = {}
-local PendingSubmitCount:    number                        = 0
-local PendingSubmitPool:     { PendingSubmit }             = {}
-local PendingSubmitPoolCount: number                       = 0
-local LastSyncTime:          number                        = 0
+local CachedWorldParts:       { OrientedBoundingBoxEntry } = {}
+local CachedWorldPartCount:   number                        = 0
+local CharacterRootSet:       { [Instance]: boolean }       = {}
+local PlayerRecords:          { PlayerRecord }              = {}
+local PlayerRecordCount:      number                        = 0
+local PlayerRecordIndex:      { [Player]: number }          = {}
+local CurrentPlayerSet:       { [Player]: boolean }         = {}
+local WhitelistBuffer:        { Whitelisted: boolean }      = { Whitelisted = false }
+local PendingSubmits:         { PendingSubmit }             = {}
+local PendingSubmitCount:     number                        = 0
+local PendingSubmitPool:      { PendingSubmit }             = {}
+local PendingSubmitPoolCount: number                        = 0
+local LastSyncTime:           number                        = 0
 
 local CACHEABLE_CLASSES: { [string]: boolean } = {
     Part           = true,
@@ -385,7 +385,13 @@ RunService.PostLocal:Connect(function()
             continue
         end
         local humanoid = record.CachedHumanoid
-        if humanoid == nil then continue end
+        if humanoid == nil then
+            if record.HasModelData then
+                whitelistBuffer.Whitelisted = false
+                EditModelData(whitelistBuffer, record.Name)
+            end
+            continue
+        end
         if (humanoid :: Humanoid).Health <= 0 then
             whitelistBuffer.Whitelisted = true
             EditModelData(whitelistBuffer, record.Name)
